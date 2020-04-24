@@ -288,8 +288,8 @@ def get_batch(image_files, width, height, mode):
 
 # Explore the data
 show_n_images = 25
-mnist_images = helper.get_batch(glob(os.path.join(data_resized_dir, '*.jpg'))[:show_n_images], 64, 64, 'RGB')
-plt.imshow(helper.images_square_grid(mnist_images, 'RGB'))
+mnist_images = get_batch(glob(os.path.join(data_resized_dir, '*.jpg'))[:show_n_images], 64, 64, 'RGB')
+plt.imshow(images_square_grid(mnist_images, 'RGB'))
 
 # Check TensorFlow version and access to Nvidia GPU
 from distutils.version import LooseVersion
@@ -613,7 +613,7 @@ def show_generator_output(sess, n_images, input_z, out_channel_dim, image_mode, 
         generator(input_z, out_channel_dim, False),
         feed_dict={input_z: example_z})
 
-    images_grid = helper.images_square_grid(samples, image_mode)
+    images_grid = images_square_grid(samples, image_mode)
 
     if save == True:
         # Save image
@@ -721,7 +721,7 @@ beta1 = 0.5
 #model = DGAN(real_size, z_size, learning_rate, alpha, beta1)
 
 # Load the data and train the network here
-dataset = helper.Dataset(glob(os.path.join(data_resized_dir, '*.jpg')))
+dataset = Dataset(glob(os.path.join(data_resized_dir, '*.jpg')))
 
 with tf.Graph().as_default():
     losses, samples = train(epochs, batch_size, z_dim, learning_rate_D, learning_rate_G, beta1, dataset.get_batches, dataset.shape, dataset.image_mode, alpha)
