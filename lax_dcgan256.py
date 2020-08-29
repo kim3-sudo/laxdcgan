@@ -1,240 +1,371 @@
+import os
+import os.path
 import numpy as np
-from numpy import expand_dims
-from numpy import zeros
-from numpy import ones
-from numpy import vstack
-from numpy.random import randn
-from numpy.random import randint
-from keras.models import load_model
-from keras.optimizers import Adam
-from keras.models import Sequential
-from keras.layers import Dense
-from keras.layers import Reshape
-from keras.layers import Flatten
-from keras.layers import Conv2D
-from keras.layers import Conv2DTranspose
-from keras.layers import LeakyReLU
-from keras.layers import Dropout
-from keras.layers import BatchNormalization
-from keras.initializers import RandomNormal
-from matplotlib import pyplot
-import argparse
-import os, os.path
-import progressbar
+import random
 from PIL import Image
-import time
-
-parser = argparse.ArgumentParser()
-parser.add_argument('-dataset', help='Folder name of the dataset', required=True, type=str)
-parser.add_argument('-load_model', help='h5 file to load', required=False, type=str, default='NONE')
-parser.add_argument('-save_model', help='weight to be saved', required=False, type=str, default='NONE')
-args = parser.parse_args()
-
-# Best practice initialiser for GANS
-initialWeights = RandomNormal(mean=0.0, stddev=0.02, seed=None)
-
-def define_discriminator(in_shape=(256,256,3)):
-	model = Sequential()
-	model.add(Conv2D(64, (3,3), strides=(2, 2), padding='same', input_shape=in_shape, kernel_initializer=initialWeights))
-	model.add(LeakyReLU(alpha=0.2))
-	model.add(Conv2D(64, (3,3), strides=(2, 2), padding='same', kernel_initializer=initialWeights))
-	model.add(BatchNormalization())
-	model.add(Conv2D(64, (3,3), strides=(2, 2), padding='same', kernel_initializer=initialWeights))
-	model.add(BatchNormalization())
-	model.add(Conv2D(64, (3,3), strides=(2, 2), padding='same', kernel_initializer=initialWeights))
-	model.add(BatchNormalization())
-	model.add(Conv2D(64, (3,3), strides=(2, 2), padding='same', kernel_initializer=initialWeights))
-	model.add(BatchNormalization())
-	model.add(Flatten())
-	model.add(Dense(1, activation='sigmoid'))
-	# compile model
-	opt = Adam(lr=0.0002, beta_1=0.5)
-	model.compile(loss='binary_crossentropy', optimizer=opt, metrics=['accuracy'])
-	return model
-
-def define_generator(latent_dim):
-	model = Sequential()
-	# foundation for 4x4 image
-	n_nodes = 256 * 4 * 4
-	model.add(Dense(n_nodes, input_dim=latent_dim))
-	#model.add(LeakyReLU(alpha=0.2))
-	model.add(Reshape((4, 4, 256)))
-	# upsample to 8x8
-	model.add(Conv2DTranspose(256, (4,4), strides=(2,2), padding='same', activation='relu', kernel_initializer=initialWeights))
-	#model.add(LeakyReLU(alpha=0.2))
-	# upsample to 16x16
-	model.add(Conv2DTranspose(256, (4,4), strides=(2,2), padding='same', activation='relu', kernel_initializer=initialWeights))
-	#model.add(LeakyReLU(alpha=0.2))
-	# upsample to 32x32
-	model.add(Conv2DTranspose(256, (4,4), strides=(2,2), padding='same', activation='relu', kernel_initializer=initialWeights))
-	#model.add(LeakyReLU(alpha=0.2))
-	# upsample to 64x64
-	model.add(Conv2DTranspose(256, (4,4), strides=(2,2), padding='same', activation='relu', kernel_initializer=initialWeights))
-	#model.add(LeakyReLU(alpha=0.2))
-	# upsample to 256x256
-	model.add(Conv2DTranspose(256, (4,4), strides=(2,2), padding='same', activation='relu', kernel_initializer=initialWeights))
-	#model.add(LeakyReLU(alpha=0.2))
-	# output layer
-	model.add(Conv2D(3, (3,3), activation='tanh', padding='same'))
-	return model
-
-# Stick them both together to form the overall GAN model (Generator > Discriminator > Classification)
-def define_gan(g_model, d_model):
-	# make weights in the discriminator not trainable
-	d_model.trainable = False
-	
-	model = Sequential()
-	model.add(g_model)
-	model.add(d_model)
-	opt = Adam(lr=0.0002, beta_1=0.5)
-	model.compile(loss='binary_crossentropy', optimizer=opt)
-	return model
-
-# select real samples
-def generate_real_samples(dataset, n_samples):
-	# choose random instances
-	ix = randint(0, dataset.shape[0], n_samples)
-	# retrieve selected images
-	X = dataset[ix]
-	# generate 'real' class labels (1)
-	y = ones((n_samples, 1))
-	return X, y
-
-# generate points in latent space as input for the generator
-def generate_latent_points(latent_dim, n_samples):
-	# generate points in the latent space
-	x_input = randn(latent_dim * n_samples)
-	# reshape into a batch of inputs for the network
-	x_input = x_input.reshape(n_samples, latent_dim)
-	return x_input
-
-# use the generator to generate n fake examples, with class labels
-def generate_fake_samples(g_model, latent_dim, n_samples):
-	# generate points in latent space
-	x_input = generate_latent_points(latent_dim, n_samples)
-	# predict outputs
-	X = g_model.predict(x_input)
-	# create 'fake' class labels (0)
-	y = zeros((n_samples, 1))
-	return X, y
-
-# create and save a plot of generated images (reversed grayscale)
-def save_plot(examples, epoch, n=2):
-	# scale from [-1,1] to [0,1]
-	examples = (examples + 1) / 2.0
-	# plot images
-	for i in range(n * n):
-		# define subplot
-		pyplot.subplot(n, n, 1 + i)
-		# turn off axis
-		pyplot.axis('off')
-		# plot raw pixel data
-		pyplot.imshow(examples[i])
-	# save plot to file
-	filename = str(int(round(time.time() * 1000))) + '.png'
-	pyplot.savefig("./output/samples/" + filename)
-	pyplot.close()
-
-# evaluate the discriminator, plot generated images, save generator model
-def summarize_performance(epoch, g_model, d_model, dataset, latent_dim, n_samples=150):
-	# prepare real samples
-	X_real, y_real = generate_real_samples(dataset, n_samples)
-	# evaluate discriminator on real examples
-	_, acc_real = d_model.evaluate(X_real, y_real, verbose=0)
-	# prepare fake examples
-	x_fake, y_fake = generate_fake_samples(g_model, latent_dim, n_samples)
-	# evaluate discriminator on fake examples
-	_, acc_fake = d_model.evaluate(x_fake, y_fake, verbose=0)
-	# summarize discriminator performance
-	print('>Accuracy real: %.0f%%, fake: %.0f%%' % (acc_real*100, acc_fake*100))
-	# save plot
-	save_plot(x_fake, epoch)
-	# save the generator model tile file
-	if(args.save_model != 'NONE'):
-		g_model.save("./output/weights/" + args.save_model + '-g.h5')
-		d_model.save("./output/weights/" + args.save_model + '-d.h5')
-
-# train the generator and discriminator
-def train(g_model, d_model, gan_model, dataset, latent_dim, n_epochs=1000, n_batch=64):
-	bat_per_epo = int(dataset.shape[0] / n_batch)
-	half_batch = int(n_batch / 2)
-	# manually enumerate epochs
-	for i in range(n_epochs):
-		# enumerate batches over the training set
-		for j in range(bat_per_epo):
-			# get randomly selected 'real' samples
-			X_real, y_real = generate_real_samples(dataset, half_batch)
-			# update discriminator model weights
-			d_loss1, _ = d_model.train_on_batch(X_real, y_real)
-			# generate 'fake' examples
-			X_fake, y_fake = generate_fake_samples(g_model, latent_dim, half_batch)
-			# update discriminator model weights
-			d_loss2, _ = d_model.train_on_batch(X_fake, y_fake)
-			# prepare points in latent space as input for the generator
-			X_gan = generate_latent_points(latent_dim, n_batch)
-			# create inverted labels for the fake samples
-			y_gan = ones((n_batch, 1))
-			# update the generator via the discriminator's error
-			g_loss = gan_model.train_on_batch(X_gan, y_gan)
-			# summarize loss on this batch
-			print('>%d, %d/%d, d1=%.3f, d2=%.3f g=%.3f' %
-				(i+1, j+1, bat_per_epo, d_loss1, d_loss2, g_loss))
-		if (i+1) % 1 == 0:
-			summarize_performance(i, g_model, d_model, dataset, latent_dim)
-		
+import matplotlib.pyplot as plt
+from math import floor
 
 
-def loadImages(location):
-	print("")
-	numImages = len([name for name in os.listdir(location) if os.path.isfile(os.path.join(location, name))])
-	print("Loading " + str(numImages) + " images from: " + location)
-	
-	X = np.zeros((numImages, 256, 256, 3)) # change as per image size
-	print ("Loading Images...")
-	"""
-	with progressbar.ProgressBar(max_value=numImages) as bar:
-		i = 0
-		for file in os.listdir(location):
-			filename = os.fsdecode(file)
-			toLoad = os.path.join(location, filename)
-			#print(toLoad)
-			X[i] = np.array(Image.open(toLoad),dtype=np.uint8)
-			#X[i] = np.array(Image.open(url).resize((256,256), Image.LANCZOS),dtype=np.uint8)
-			i+=1
-			#print(i)
-			bar.update(i)	
-	
-	X = X.astype('float32')
-	X = (X - 127.5) / 127.5
-    """
-	return X
+def zero():
+    return np.random.uniform(0.0, 0.01, size = [1])
 
-imageFiles = "./data/" + args.dataset
+def one():
+    return np.random.uniform(0.99, 1.0, size = [1])
+
+def noise(n):
+    return np.random.uniform(-1.0, 1.0, size = [n, 4096])
+
+print("Importing Images...")
+
+Images = []
+images_path = os.getcwd() + '\\\\resizedData\\\\'
+script_dir = os.path.dirname(os.path.abspath(__file__))
+img_dir = (script_dir + '\\resizedData\\')
+
+files = os.listdir(images_path)
+for n in range(0, len(files)):    
+    #temp1 = Image.open(f"{str(n).zfill(3)}.jpg"
+    temp1 = Image.open(os.path.join(img_dir, f'{str(n).zfill(3)}.jpg'))
+                
+    temp = np.array(temp1.convert('RGB'), dtype='float32')
+    
+    Images.append(temp / 255)
+    
+    Images.append(np.flip(Images[-1], 1))
+    
+from keras.layers import Conv2D, LeakyReLU, BatchNormalization, Dense, AveragePooling2D, GaussianNoise
+from keras.layers import Reshape, UpSampling2D, Activation, Dropout, Flatten, Conv2DTranspose
+from keras.models import model_from_json, Sequential
+from keras.optimizers import Adam
+    
+class GAN(object):
+    
+    def __init__(self):
+        
+        #Models
+        self.D = None
+        self.G = None
+        
+        self.OD = None
+        
+        self.DM = None
+        self.AM = None
+        
+        #Config
+        self.LR = 0.0001
+        self.steps = 1
+        
+    def discriminator(self):
+        
+        if self.D:
+            return self.D
+        
+        self.D = Sequential()
+        
+        #add Gaussian noise to prevent Discriminator overfitting
+        self.D.add(GaussianNoise(0.2, input_shape = [256, 256, 3]))
+        
+        #256x256x3 Image
+        self.D.add(Conv2D(filters = 8, kernel_size = 3, padding = 'same'))
+        self.D.add(LeakyReLU(0.2))
+        self.D.add(Dropout(0.25))
+        self.D.add(AveragePooling2D())
+        
+        #128x128x8
+        self.D.add(Conv2D(filters = 16, kernel_size = 3, padding = 'same'))
+        self.D.add(BatchNormalization(momentum = 0.7))
+        self.D.add(LeakyReLU(0.2))
+        self.D.add(Dropout(0.25))
+        self.D.add(AveragePooling2D())
+        
+        #64x64x16
+        self.D.add(Conv2D(filters = 32, kernel_size = 3, padding = 'same'))
+        self.D.add(BatchNormalization(momentum = 0.7))
+        self.D.add(LeakyReLU(0.2))
+        self.D.add(Dropout(0.25))
+        self.D.add(AveragePooling2D())
+        
+        #32x32x32
+        self.D.add(Conv2D(filters = 64, kernel_size = 3, padding = 'same'))
+        self.D.add(BatchNormalization(momentum = 0.7))
+        self.D.add(LeakyReLU(0.2))
+        self.D.add(Dropout(0.25))
+        self.D.add(AveragePooling2D())
+        
+        #16x16x64
+        self.D.add(Conv2D(filters = 128, kernel_size = 3, padding = 'same'))
+        self.D.add(BatchNormalization(momentum = 0.7))
+        self.D.add(LeakyReLU(0.2))
+        self.D.add(Dropout(0.25))
+        self.D.add(AveragePooling2D())
+        
+        #8x8x128
+        self.D.add(Conv2D(filters = 256, kernel_size = 3, padding = 'same'))
+        self.D.add(BatchNormalization(momentum = 0.7))
+        self.D.add(LeakyReLU(0.2))
+        self.D.add(Dropout(0.25))
+        self.D.add(AveragePooling2D())
+        
+        #4x4x256
+        self.D.add(Flatten())
+        
+        #256
+        self.D.add(Dense(128))
+        self.D.add(LeakyReLU(0.2))
+        
+        self.D.add(Dense(1, activation = 'sigmoid'))
+        
+        return self.D
+    
+    def generator(self):
+        
+        if self.G:
+            return self.G
+        
+        self.G = Sequential()
+        
+        self.G.add(Reshape(target_shape = [1, 1, 4096], input_shape = [4096]))
+        
+        #1x1x4096 
+        self.G.add(Conv2DTranspose(filters = 256, kernel_size = 4))
+        self.G.add(Activation('relu'))
+        
+        #4x4x256 - kernel sized increased by 1
+        self.G.add(Conv2D(filters = 256, kernel_size = 4, padding = 'same'))
+        self.G.add(BatchNormalization(momentum = 0.7))
+        self.G.add(Activation('relu'))
+        self.G.add(UpSampling2D())
+        
+        #8x8x256 - kernel sized increased by 1
+        self.G.add(Conv2D(filters = 128, kernel_size = 4, padding = 'same'))
+        self.G.add(BatchNormalization(momentum = 0.7))
+        self.G.add(Activation('relu'))
+        self.G.add(UpSampling2D())
+        
+        #16x16x128
+        self.G.add(Conv2D(filters = 64, kernel_size = 3, padding = 'same'))
+        self.G.add(BatchNormalization(momentum = 0.7))
+        self.G.add(Activation('relu'))
+        self.G.add(UpSampling2D())
+        
+        #32x32x64
+        self.G.add(Conv2D(filters = 32, kernel_size = 3, padding = 'same'))
+        self.G.add(BatchNormalization(momentum = 0.7))
+        self.G.add(Activation('relu'))
+        self.G.add(UpSampling2D())
+        
+        #64x64x32
+        self.G.add(Conv2D(filters = 16, kernel_size = 3, padding = 'same'))
+        self.G.add(BatchNormalization(momentum = 0.7))
+        self.G.add(Activation('relu'))
+        self.G.add(UpSampling2D())
+        
+        #128x128x16
+        self.G.add(Conv2D(filters = 8, kernel_size = 3, padding = 'same'))
+        self.G.add(Activation('relu'))
+        self.G.add(UpSampling2D())
+        
+        #256x256x8
+        self.G.add(Conv2D(filters = 3, kernel_size = 3, padding = 'same'))
+        self.G.add(Activation('sigmoid'))
+        
+        return self.G
+    
+    def DisModel(self):
+        
+        if self.DM == None:
+            self.DM = Sequential()
+            self.DM.add(self.discriminator())
+        
+        self.DM.compile(optimizer = Adam(lr = self.LR * (0.85 ** floor(self.steps / 10000))), loss = 'binary_crossentropy')
+        
+        return self.DM
+    
+    def AdModel(self):
+        
+        if self.AM == None:
+            self.AM = Sequential()
+            self.AM.add(self.generator())
+            self.AM.add(self.discriminator())
+            
+        self.AM.compile(optimizer = Adam(lr = self.LR * (0.85 ** floor(self.steps / 10000))), loss = 'binary_crossentropy')
+        
+        return self.AM
+    
+    def sod(self):
+        
+        self.OD = self.D.get_weights()
+        
+    def lod(self):
+        
+        self.D.set_weights(self.OD)
 
 
-args.load_model
 
+class Model_GAN(object):
+    
+    def __init__(self):
+        
+        self.GAN = GAN()
+        self.DisModel = self.GAN.DisModel()
+        self.AdModel = self.GAN.AdModel()
+        self.generator = self.GAN.generator()
+        
+    def train(self, batch = 16):
+        
+        (a, b) = self.train_dis(batch)
+        c = self.train_gen(batch)
+        
+        print(f"D Real: {str(a)}, D Fake: {str(b)}, G All: {str(c)}")
+        
+        if self.GAN.steps % 500 == 0:
+            self.save(floor(self.GAN.steps / 1000))
+            self.evaluate()
+            
+        if self.GAN.steps % 5000 == 0:
+            self.GAN.AM = None
+            self.GAN.DM = None
+            self.AdModel = self.GAN.AdModel()
+            self.DisModel = self.GAN.DisModel()
+        
+        self.GAN.steps = self.GAN.steps + 1
+        
+    def train_dis(self, batch):
+        
+        #Get Real Images
+        im_no = random.randint(0, len(Images) - batch - 1)
+        train_data = Images[im_no : im_no + int(batch / 2)]
+        label_data = []
+        for i in range(int(batch / 2)):
+            #label_data.append(one())
+            label_data.append(zero())
+            
+        d_loss_real = self.DisModel.train_on_batch(np.array(train_data), np.array(label_data))
+        
+        #Get Fake Images
+        train_data = self.generator.predict(noise(int(batch / 2)))
+        label_data = []
+        for i in range(int(batch / 2)):
+            #label_data.append(zero())
+            label_data.append(one())
+            
+        d_loss_fake = self.DisModel.train_on_batch(train_data, np.array(label_data))
+        
+        return (d_loss_real, d_loss_fake)
+        
+    def train_gen(self, batch):
+        
+        self.GAN.sod()
+        
+        label_data = []
+        for i in range(int(batch)):
+            #label_data.append(one())
+            label_data.append(zero())
+        
+        g_loss = self.AdModel.train_on_batch(noise(batch), np.array(label_data))
+        
+        self.GAN.lod()
+        
+        return g_loss
+        
+    def evaluate(self):
+        
+        im_no = random.randint(0, len(Images) - 1)
+        im1 = Images[im_no]
+        
+        im2 = self.generator.predict(noise(2))
+        
+        plt.figure(1)
+        plt.imshow(im1)
+        
+        plt.figure(2)
+        plt.imshow(im2[0])
+        
+        plt.figure(3)
+        plt.imshow(im2[1])
+        
+        plt.show()
+        
+    def save(self, num):
+        gen_json = self.GAN.G.to_json()
+        dis_json = self.GAN.D.to_json()
 
-# size of the latent space
-latent_dim = 100
+        with open("Models/gen.json", "w+") as json_file:
+            json_file.write(gen_json)
 
-#load weights 
-if(args.load_model != 'NONE'):
-	print("Loading weights for: " + args.load_model)
-	g_model = load_model("./output/weights/" + args.load_model + '-g.h5')
-	d_model = load_model("./output/weights/" + args.load_model + '-d.h5')
-	print("Success!")
-else:
-	print("Creating new models")
-	# create the discriminator
-	d_model = define_discriminator()
-	# create the generator
-	g_model = define_generator(latent_dim)
-	print("Success!")
+        with open("Models/dis.json", "w+") as json_file:
+            json_file.write(dis_json)
 
-# create the gan
-gan_model = define_gan(g_model, d_model)
-# load image data
-dataset = loadImages(imageFiles)
-# train model
-train(g_model, d_model, gan_model, dataset, latent_dim)
+        self.GAN.G.save_weights("Models/gen"+str(num)+".h5")
+        self.GAN.D.save_weights("Models/dis"+str(num)+".h5")
+
+        print(f"Model number {str(num)} Saved!")
+
+    def load(self, num):
+        steps1 = self.GAN.steps
+        
+        self.GAN = None
+        self.GAN = GAN()
+
+        #Generator
+        gen_file = open("Models/gen.json", 'r')
+        gen_json = gen_file.read()
+        gen_file.close()
+        
+        self.GAN.G = model_from_json(gen_json)
+        self.GAN.G.load_weights("Models/gen"+str(num)+".h5")
+
+        #Discriminator
+        dis_file = open("Models/dis.json", 'r')
+        dis_json = dis_file.read()
+        dis_file.close()
+        
+        self.GAN.D = model_from_json(dis_json)
+        self.GAN.D.load_weights("Models/dis"+str(num)+".h5")
+
+        #Reinitialize
+        self.generator = self.GAN.generator()
+        self.DisModel = self.GAN.DisModel()
+        self.AdModel = self.GAN.AdModel()
+        
+        self.GAN.steps = steps1
+        
+    def eval2(self, num = 0):
+        
+        im2 = self.generator.predict(noise(48))
+        
+        r1 = np.concatenate(im2[:8], axis = 1)
+        r2 = np.concatenate(im2[8:16], axis = 1)
+        r3 = np.concatenate(im2[16:24], axis = 1)
+        r4 = np.concatenate(im2[24:32], axis = 1)
+        r5 = np.concatenate(im2[32:40], axis = 1)
+        r6 = np.concatenate(im2[40:48], axis = 1)
+        
+        c1 = np.concatenate([r1, r2, r3, r4, r5, r6], axis = 0)
+        
+        x = Image.fromarray(np.uint8(c1*255))
+        
+        x.save("Results/i"+str(num)+".png")
+        
+def main():
+    model = Model_GAN() 
+    model.GAN.D.summary()
+    model.GAN.G.summary()
+    
+    print("We're off! See you in a while!")
+    #model.GAN.steps = 165001
+    while(model.GAN.steps < 500000):
+        
+        #print("\n\n\n\nRound " + str(model.GAN.steps) + ":")
+        model.train()
+        if model.GAN.steps % 500 == 0:
+            print("\nRound: " + str(model.GAN.steps))
+        
+        if model.GAN.steps % 1000 == 0:
+            print("\n\n\n\nRound " + str(model.GAN.steps) + ":")
+            model.eval2(int(model.GAN.steps / 1000))
+
+if __name__ == "__main__":
+    # execute only if run as a script
+    main()
